@@ -3,11 +3,8 @@
 
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
-    # Pinned to the branch until logos-evm-keystore-module#7 merges: this UI is the
-    # custodian that gate names, and it needs the change_password/label contract that
-    # lands with it. Move to the bare URL on merge.
     keystore_module = {
-      url = "github:logos-co/logos-evm-keystore-module/feat/tier-d";
+      url = "github:logos-co/logos-evm-keystore-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
   };
