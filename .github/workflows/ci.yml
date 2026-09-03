@@ -1,0 +1,121 @@
+name: CI
+
+# Everything this repo can assert without an app.
+#
+# The custodian screen's own test suite splits in two, and only the first half
+# can run here: `assert_ui.py --grep-only` and `tree_table.mjs` open no socket
+# and need no Qt, while sections 1 and up of assert_ui.py drive a live
+# logos-standalone-app over the QML inspector. That half is NOT wired up — it
+# needs a built keystore_module, a staged -dev variant and a keystore holding two
+# derivable wallets, none of which a PR runner has. What IS covered is every rule
+# in src/qml/tree.js, the Theme tokens, the PlainText discipline, and that the
+# QML resolves and loads at all.
+#
+# The design system is not a flake input — it is static-linked into the host
+# binary, so this module declares nothing — but its SOURCE decides two things
+# here: which Theme tokens exist, and whether `import Logos.Controls` resolves.
+# It is checked out BESIDE the repo rather than inside it because assert_ui.py
+# looks for it as a workspace sibling; without that it silently falls back to a
+# token list pinned in the file, which is why the run below asserts which one it
+# read.
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-assertions:
+    name: assert_ui.py --grep-only + tree table
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: logos-keystore-ui
+
+      - uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-design-system
+          path: logos-design-system
+
+      - name: Section 0 — the claims a source file can answer for
+        working-directory: logos-keystore-ui
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 doctests/assert_ui.py --grep-only 2>&1 | tee /tmp/grep-only.log
+          # Both halves of this file degrade to a PASS rather than a failure when
+          # something they need is absent: the Theme check falls back to a token
+          # list pinned in the file, and the tree table SKIPs when `node` is
+          # missing. Either leaves a green run asserting less than it appears to.
+          if ! grep -q "read from: logos-design-system" /tmp/grep-only.log; then
+            echo "::error::fell back to the pinned token list"; exit 1
+          fi
+          if grep -q "SKIP" /tmp/grep-only.log; then
+            echo "::error::a section skipped instead of running"; exit 1
+          fi
+
+  qml:
+    name: qmllint + load
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: logos-keystore-ui
+
+      - uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-design-system
+          path: logos-design-system
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Gate A — static (imports, type and property names)
+        working-directory: logos-keystore-ui
+        # `-W 0` fails on the first WARNING; the Info-level unused-import notes
+        # this tree carries are below that line and stay notes. `--unqualified`
+        # is off because `logos` is injected by the host, so every view here
+        # references an identifier no static pass can resolve.
+        run: |
+          nix shell nixpkgs#qt6.qtdeclarative -c bash -c '
+            QTQML=$(dirname $(dirname $(readlink -f $(command -v qmllint))))/lib/qt-6/qml
+            qmllint -I "$QTQML" -I ../logos-design-system/src/qml \
+                    -W 0 --unqualified disable src/qml/*.qml'
+
+      - name: Gate B — construct the view for real
+        working-directory: logos-keystore-ui
+        run: |
+          nix shell nixpkgs#qt6.qtdeclarative nixpkgs#qt6.qtsvg -c bash -c '
+            QTQML=$(dirname $(dirname $(readlink -f $(command -v qml))))/lib/qt-6/qml
+            # Basic is load-bearing: under a platform style the design system'"'"'s
+            # own contentItem overrides are REJECTED, which reads as a bug in
+            # this view. Both hosts force it; a bare `qml` does not.
+            QT_QUICK_CONTROLS_STYLE=Basic QT_QPA_PLATFORM=offscreen \
+              timeout 60 qml -I "$QTQML" -I ../logos-design-system/src/qml \
+              src/qml/KeystoreView.qml > /tmp/qml.log 2>&1
+            status=$?
+            cat /tmp/qml.log
+            # 124 IS THE PASS. The view is an Item, not a Window, so a healthy
+            # load runs the event loop until timeout kills it; qml exits 2 for a
+            # bad import and for an unknown property, and only reaches 124 when
+            # every component constructed.
+            if [ $status -ne 124 ]; then
+              echo "::error::qml exited $status (expected 124 = loaded and still running)"
+              exit 1
+            fi
+            if grep -qE "does not support customization|Cannot assign|was not found" /tmp/qml.log; then
+              echo "::error::QML component errors above"; exit 1
+            fi
+            # `logos` is the host-injected global and is absent by construction
+            # here, so its ReferenceError is the one expected line. Any OTHER
+            # name that fails to resolve at load is a typo the view would carry
+            # into the app, where it costs a whole panel and one qWarning.
+            if grep "ReferenceError" /tmp/qml.log | grep -v "logos is not defined"; then
+              echo "::error::unexpected ReferenceError above"; exit 1
+            fi'
