@@ -62,6 +62,7 @@ jobs:
           fi
 
   qml:
+    environment: ${{ (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && 'public-cache' || '' }}
     name: qmllint + load
     runs-on: ubuntu-latest
     steps:
@@ -74,7 +75,20 @@ jobs:
           repository: logos-co/logos-design-system
           path: logos-design-system
 
-      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Install Nix and set up the shared cache
+        uses: logos-co/setup-nix-cache-action@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          # Keep READING the old Cachix while the Attic caches fill up. The
+          # rust crate derivations this build needs are in Cachix and in no
+          # other cache -- so dropping it outright did not just cost cache
+          # hits, it turned "substitute a prebuilt path" into "build it from
+          # source", which fails. Credential-free: the cache is public, and
+          # nothing publishes here any more. Remove once Attic has the paths.
+          extra-nix-config: |
+            extra-substituters = https://logos-co.cachix.org
+            extra-trusted-public-keys = logos-co.cachix.org-1:12K8609ho1pCt0erUQrOrs/KmOuhWq/EhVwhzQRb35E=
 
       - name: Gate A — static (imports, type and property names)
         working-directory: logos-keystore-ui
