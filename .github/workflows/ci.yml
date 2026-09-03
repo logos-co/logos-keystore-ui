@@ -96,11 +96,25 @@ jobs:
             # Basic is load-bearing: under a platform style the design system'"'"'s
             # own contentItem overrides are REJECTED, which reads as a bug in
             # this view. Both hosts force it; a bare `qml` does not.
+            # QT_LOGGING_TO_CONSOLE is load-bearing, not tidiness: nixpkgs
+            # builds Qt with -DQT_FEATURE_journald=ON, and Qt then sends every
+            # message to journald whenever stderr is not a tty — which on a
+            # runner it never is. The first green run of this gate wrote an
+            # EMPTY qml.log, so all three greps below matched nothing and
+            # passed on an absence rather than on a clean load.
+            QT_LOGGING_TO_CONSOLE=1 \
             QT_QUICK_CONTROLS_STYLE=Basic QT_QPA_PLATFORM=offscreen \
               timeout 60 qml -I "$QTQML" -I ../logos-design-system/src/qml \
               src/qml/KeystoreView.qml > /tmp/qml.log 2>&1
             status=$?
             cat /tmp/qml.log
+            # The view cannot load without saying so: `logos` is absent here and
+            # its ReferenceError is unavoidable. An empty log means the messages
+            # went somewhere else again, and every check below is then vacuous.
+            if ! grep -q "logos is not defined" /tmp/qml.log; then
+              echo "::error::no Qt output reached stderr — the checks below prove nothing"
+              exit 1
+            fi
             # 124 IS THE PASS. The view is an Item, not a Window, so a healthy
             # load runs the event loop until timeout kills it; qml exits 2 for a
             # bad import and for an unknown property, and only reaches 124 when
