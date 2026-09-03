@@ -228,9 +228,10 @@ not author. Purpose `44'` and coin `60'` are shown fixed and are not editable �
 coin type can be changed is a way to make funds unrecoverable, dressed as a feature.
 
 If this build is not the configured custodian it says so once, plainly, instead of letting
-every button fail one screen later — and if `keystore.json` could not be read at all it says
-*that* instead, because an unreadable config empties both roles rather than reverting to the
-defaults, and blaming the deployment for a torn file is a different bug to go looking for.
+every button fail one screen later, and it names the module that does hold the role. The
+keystore holds that name itself and its `configure` method is what changes it — there is no
+config file to be unreadable. That document is total, so a role it does not name is held by
+**nobody**; the notice says that outright rather than naming an empty string.
 
 ## Testing
 
