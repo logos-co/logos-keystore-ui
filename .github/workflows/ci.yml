@@ -7,9 +7,9 @@ name: CI
 # and need no Qt, while sections 1 and up of assert_ui.py drive a live
 # logos-standalone-app over the QML inspector. That half is NOT wired up — it
 # needs a built keystore_module, a staged -dev variant and a keystore holding two
-# derivable wallets, none of which a PR runner has. What IS covered is every rule
-# in src/qml/tree.js, the Theme tokens, the PlainText discipline, and that the
-# QML resolves and loads at all.
+# derivable wallets, none of which a PR runner has. What IS covered is that the
+# flake builds and packages, every rule in src/qml/tree.js, the Theme tokens, the
+# PlainText discipline, and that the QML resolves and loads at all.
 #
 # The design system is not a flake input — it is static-linked into the host
 # binary, so this module declares nothing — but its SOURCE decides two things
@@ -31,6 +31,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build:
+    name: nix build
+    environment: ${{ (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && 'public-cache' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # At the default path, unlike the jobs below: the sibling layout exists
+      # only so assert_ui.py can find the design system, which the flake -- not
+      # declaring it as an input -- has no use for.
+      - uses: actions/checkout@v4
+
+      - name: Install Nix and set up the shared cache
+        uses: logos-co/setup-nix-cache-action@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          # Keep READING the old Cachix while the Attic caches fill up. The
+          # rust crate derivations this build needs are in Cachix and in no
+          # other cache -- so dropping it outright did not just cost cache
+          # hits, it turned "substitute a prebuilt path" into "build it from
+          # source", which fails. Credential-free: the cache is public, and
+          # nothing publishes here any more. Remove once Attic has the paths.
+          extra-nix-config: |
+            extra-substituters = https://logos-co.cachix.org
+            extra-trusted-public-keys = logos-co.cachix.org-1:12K8609ho1pCt0erUQrOrs/KmOuhWq/EhVwhzQRb35E=
+
+      - name: Build plugin and package
+        run: nix build -L .#lgx
+
   source-assertions:
     name: assert_ui.py --grep-only + tree table
     runs-on: ubuntu-latest
