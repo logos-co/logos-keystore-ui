@@ -11,6 +11,9 @@
   "icon": "src/icons/keystore.png",
   "view": "qml/KeystoreView.qml",
   "dependencies": ["keystore_module"],
+  "provides": [
+    { "intent": "evm.accounts.manage", "handoff": true }
+  ],
   "codegen": { "rep": "src/keystore_ui.rep" },
   "nix": {
     "external_libraries": [],
