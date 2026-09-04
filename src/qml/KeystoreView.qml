@@ -31,6 +31,19 @@ Item {
         function onViewModuleReadyChanged(moduleName, isReady) {
             if (moduleName === "keystore_ui") root.ready = isReady && root.backend !== null
         }
+
+        // Somebody wants accounts managed, and the shell has already brought us forward —
+        // arriving IS the request, so answer now rather than waiting for the human to do
+        // something. `handoff: true` is what leaves them here instead of bouncing them back.
+        //
+        // Answered `ok` even when this build is not the custodian. The request was to reach
+        // the accounts surface and it did; whether accounts can be CHANGED from here is what
+        // the READ ONLY badge and its banner are for, and `ready` may still be false at the
+        // instant we are dispatched, so gating on it would refuse a request that succeeded.
+        function onIntentRequested(requestId, intent, params, requesterName) {
+            if (intent !== "evm.accounts.manage") return
+            logos.respond(requestId, true, ({}), "")
+        }
     }
 
     function j(t, fb) { try { return JSON.parse(t && t.length ? t : fb) } catch (e) { return JSON.parse(fb) } }
