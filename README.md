@@ -35,6 +35,7 @@ nobody asking, and closes wallets opened for apps.
 | Manage a Bitcoin wallet → Show descriptor | `account_descriptors` |
 | Kept recovery phrases → Show or forget | `list_phrases`, `show_phrase`, `forget_phrase` |
 | Requests from apps *(open a wallet, unlock an account)* | the manager's `access_requests`, `acknowledge_access`, `approve_access`, `reject_access` |
+| Requests from apps → Add a wallet… *(of the kind and on the network asked for; picked once made)* | `create_mnemonic`, `import_bitcoin` |
 | Unlock… / Unlocked / Lock all | the manager's `unlock`, `unlocked`, `lock` |
 | Open in apps / Close | the manager's `open_accounts`, `close_account` |
 
@@ -255,11 +256,12 @@ python3 doctests/assert_ui.py               # the rest, against an app on port 3
 ```
 
 `doctests/evm-keystore-ui-e2e.test.yaml` runs the keys app in a headless host beside the
-`keys_probe` fixture. The person adds a regtest Bitcoin wallet, keeping its phrase; the fixture
-asks to open it and then to unlock it for two confirmed signatures; the person decides both,
-then shows the descriptor and the kept phrase behind their warnings and forgets the phrase. It
-checks what the fixture was handed: the descriptors, a 32-byte database key, and the terms the
-person granted.
+`keys_probe` fixture. The fixture asks to open any native segwit wallet on regtest before one
+exists, so the person adds one from the request, keeping its phrase, and opens it. The fixture
+then asks to unlock it for two confirmed signatures, and the person grants that too. Last, the
+person shows the descriptor and the kept phrase behind their warnings and forgets the phrase.
+The spec checks what the fixture was handed: the descriptors, a 32-byte database key, and the
+terms the person granted.
 
 ## Building
 

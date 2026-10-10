@@ -707,11 +707,21 @@ Item {
         wallets: root.bitcoinWallets
         onDecided: function (handle, approved) { root.answerIntent(handle, approved, approved ? "" : "rejected") }
         onDeferred: function (handle) { root.answerIntent(handle, false, "cancelled") }
+        onAddWallet: function (family, chain) {
+            bitcoinImportSheet.presetFamily = family
+            bitcoinImportSheet.presetChain = chain
+            bitcoinImportSheet.open()
+        }
     }
     UnlockSheet { id: unlockSheet; backend: root.backend; accounts: root.unlockable }
 
     // ── Bitcoin wallets and kept phrases ───────────────────────────────────────────
-    BitcoinImportSheet { id: bitcoinImportSheet; backend: root.backend; phrases: root.phrases }
+    BitcoinImportSheet {
+        id: bitcoinImportSheet
+        backend: root.backend
+        phrases: root.phrases
+        onAdded: function (group) { if (accessSheet.opened) accessSheet.pickWallet(group) }
+    }
     BitcoinWalletSheet { id: bitcoinWalletSheet; backend: root.backend; view: root }
     KeptPhraseSheet { id: keptPhraseSheet; backend: root.backend }
     ManageWalletSheet {
