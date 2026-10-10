@@ -53,6 +53,21 @@ bool EvmKeystoreUiBackend::ok(const QString &reply, const QString &context)
     return false;
 }
 
+bool EvmKeystoreUiBackend::okManager(const QString &reply, const QString &context)
+{
+    const QJsonObject o = parseObject(reply);
+    if (o.value(QStringLiteral("ok")).toBool())
+        return true;
+    QString e = o.value(QStringLiteral("error")).toString();
+    if (e.isEmpty())
+        e = QStringLiteral("the signer manager refused the request");
+    if (e == QLatin1String("not authorized"))
+        e = QStringLiteral("this build is not the signer manager's configured custodian, so it may "
+                           "not open or unlock accounts for apps");
+    say(context.isEmpty() ? e : QStringLiteral("%1: %2").arg(context, e));
+    return false;
+}
+
 bool EvmKeystoreUiBackend::read(const QString &key, const QString &reply, const QString &context)
 {
     const bool good = ok(reply, context);
@@ -71,7 +86,256 @@ void EvmKeystoreUiBackend::onContextReady()
     modules().keystore_module.onAccounts_changed([this](int) {
         QTimer::singleShot(0, [this] { refresh(); });
     });
+    // Requests from apps, and unlocks ending or changing. Handles only; re-read off the IPC stack.
+    modules().signer_manager_module.onAccess_requested([this](QString) {
+        QTimer::singleShot(0, this, [this] { refreshAccess(); });
+    });
+    modules().signer_manager_module.onAccess_settled([this](QString, QString) {
+        QTimer::singleShot(0, this, [this] { refreshAccess(); });
+    });
+    modules().signer_manager_module.onUnlock_changed([this](QString) {
+        QTimer::singleShot(0, this, [this] { refreshAccess(); });
+    });
+    // A device plugged in or out, or a signer added: its accounts are re-read.
+    modules().signer_manager_module.onAccounts_changed([this](auto) {
+        QTimer::singleShot(0, this, [this] { refreshAccess(); });
+    });
     refresh();
+}
+
+void EvmKeystoreUiBackend::loadPhrases()
+{
+    const QString reply = modules().keystore_module.list_phrases();
+    setPhrasesJson(read(QStringLiteral("phrases"), reply, QStringLiteral("kept phrases"))
+                       ? compact(parseObject(reply).value(QStringLiteral("phrases")))
+                       : QStringLiteral("[]"));
+    publishReads();
+}
+
+QString EvmKeystoreUiBackend::importBitcoinWith(QJsonObject p)
+{
+    setLastError(QString());
+    QString body = params(p);
+    for (const QString &k : { QStringLiteral("phrase"), QStringLiteral("passphrase"), QStringLiteral("password"),
+                              QStringLiteral("phrasePassword") })
+        p.remove(k);
+    const QString reply = modules().keystore_module.import_bitcoin(body);
+    body.fill(QChar(0));
+    if (!ok(reply, QStringLiteral("Bitcoin wallet")))
+        return QString();
+    refresh();
+    return parseObject(reply).value(QStringLiteral("group")).toString();
+}
+
+QString EvmKeystoreUiBackend::importBitcoin(QString phrase, QString bip39Passphrase, QString family, QString chain,
+                                            QString password, QString label, QString keepPhrasePassword)
+{
+    QJsonObject p;
+    p[QStringLiteral("phrase")] = phrase;
+    p[QStringLiteral("passphrase")] = bip39Passphrase;
+    p[QStringLiteral("family")] = family;
+    p[QStringLiteral("chain")] = chain;
+    p[QStringLiteral("password")] = password;
+    p[QStringLiteral("label")] = label;
+    if (!keepPhrasePassword.isEmpty())
+        p[QStringLiteral("keepPhrase")] = QJsonObject{ { QStringLiteral("password"), keepPhrasePassword } };
+    phrase.fill(QChar(0));
+    bip39Passphrase.fill(QChar(0));
+    password.fill(QChar(0));
+    keepPhrasePassword.fill(QChar(0));
+    return importBitcoinWith(p);
+}
+
+QString EvmKeystoreUiBackend::importBitcoinFromKept(QString phraseId, QString phrasePassword, QString bip39Passphrase,
+                                                    QString family, QString chain, QString password, QString label)
+{
+    QJsonObject p;
+    p[QStringLiteral("keptPhrase")] = phraseId;
+    p[QStringLiteral("phrasePassword")] = phrasePassword;
+    p[QStringLiteral("passphrase")] = bip39Passphrase;
+    p[QStringLiteral("family")] = family;
+    p[QStringLiteral("chain")] = chain;
+    p[QStringLiteral("password")] = password;
+    p[QStringLiteral("label")] = label;
+    phrasePassword.fill(QChar(0));
+    bip39Passphrase.fill(QChar(0));
+    password.fill(QChar(0));
+    return importBitcoinWith(p);
+}
+
+QString EvmKeystoreUiBackend::showPhrase(QString phraseId, QString password)
+{
+    setLastError(QString());
+    QJsonObject p;
+    p[QStringLiteral("phrase")] = phraseId;
+    p[QStringLiteral("password")] = password;
+    QString body = params(p);
+    password.fill(QChar(0));
+    const QString reply = modules().keystore_module.show_phrase(body);
+    body.fill(QChar(0));
+    if (!ok(reply, QStringLiteral("show phrase")))
+        return {};
+    return parseObject(reply).value(QStringLiteral("words")).toString();
+}
+
+bool EvmKeystoreUiBackend::forgetPhrase(QString phraseId)
+{
+    setLastError(QString());
+    QJsonObject p;
+    p[QStringLiteral("phrase")] = phraseId;
+    const bool good = ok(modules().keystore_module.forget_phrase(params(p)), QStringLiteral("forget phrase"));
+    refresh();
+    return good;
+}
+
+QString EvmKeystoreUiBackend::walletDescriptors(QString group)
+{
+    setLastError(QString());
+    QJsonObject p;
+    p[QStringLiteral("group")] = group;
+    const QString reply = modules().keystore_module.account_descriptors(params(p));
+    if (!ok(reply, QStringLiteral("descriptor")))
+        return {};
+    QJsonObject o = parseObject(reply);
+    o.remove(QStringLiteral("ok"));
+    return compact(o);
+}
+
+void EvmKeystoreUiBackend::refreshAccess()
+{
+    // Any named module may list accounts: the ones a signer other than the keystore offers.
+    QJsonArray devices;
+    for (const QJsonValue &a : parseObject(modules().signer_manager_module.accounts())
+                                   .value(QStringLiteral("accounts")).toArray())
+        if (a.toObject().value(QStringLiteral("signer")).toString() != QLatin1String("keystore_module"))
+            devices.append(a);
+    setDeviceAccountsJson(compact(devices));
+
+    const QJsonObject id = parseObject(modules().signer_manager_module.caller_identity());
+    const QString me = id.value(QStringLiteral("identity")).toString();
+    const bool custodian = !me.isEmpty()
+        && id.value(QStringLiteral("custodians")).toArray().contains(QJsonValue(me));
+    setIsManagerCustodian(custodian);
+    if (!custodian) {
+        setAccessJson(QStringLiteral("[]"));
+        setUnlockedJson(QStringLiteral("[]"));
+        setOpenJson(QStringLiteral("[]"));
+        return;
+    }
+    const QJsonObject q = parseObject(modules().signer_manager_module.access_requests());
+    setAccessJson(compact(q.value(QStringLiteral("requests")).toArray()));
+    const QJsonObject u = parseObject(modules().signer_manager_module.unlocked());
+    setUnlockedJson(compact(u.value(QStringLiteral("unlocked")).toArray()));
+    const QJsonObject o = parseObject(modules().signer_manager_module.open_accounts());
+    setOpenJson(compact(o.value(QStringLiteral("open")).toArray()));
+    // A request that settled elsewhere leaves the screen with it.
+    const QString shown = parseObject(accessShownJson()).value(QStringLiteral("handle")).toString();
+    if (!shown.isEmpty()) {
+        bool still = false;
+        for (const QJsonValue &r : q.value(QStringLiteral("requests")).toArray())
+            still = still || r.toObject().value(QStringLiteral("handle")).toString() == shown;
+        if (!still)
+            setAccessShownJson(QStringLiteral("{}"));
+    }
+}
+
+bool EvmKeystoreUiBackend::showAccess(QString handle)
+{
+    setLastError(QString());
+    const QString reply = modules().signer_manager_module.acknowledge_access(handle);
+    if (!okManager(reply, QStringLiteral("open the request"))) {
+        setAccessShownJson(QStringLiteral("{}"));
+        return false;
+    }
+    QJsonObject shown = parseObject(reply);
+    shown.remove(QStringLiteral("ok"));
+    setAccessShownJson(compact(shown));
+    return true;
+}
+
+bool EvmKeystoreUiBackend::approveAccess(QString handle, QString bundleId, QString group,
+                                         QString password, QString unlockJson)
+{
+    setLastError(QString());
+    // Only what is on screen, and refused before the password is used for anything else.
+    const QJsonObject shown = parseObject(accessShownJson());
+    if (handle.isEmpty() || shown.value(QStringLiteral("handle")).toString() != handle
+        || shown.value(QStringLiteral("bundle_id")).toString() != bundleId) {
+        say(QStringLiteral("That is not the request on screen."));
+        password.fill(QChar(0));
+        return false;
+    }
+    QJsonObject p;
+    p[QStringLiteral("handle")] = handle;
+    p[QStringLiteral("bundle_id")] = bundleId;
+    p[QStringLiteral("password")] = password;
+    if (!group.isEmpty())
+        p[QStringLiteral("group")] = group;
+    const QJsonObject terms = QJsonDocument::fromJson(unlockJson.toUtf8()).object();
+    if (!terms.isEmpty())
+        p[QStringLiteral("unlock")] = terms;
+    QString body = params(p);
+    password.fill(QChar(0));
+    const bool good = okManager(modules().signer_manager_module.approve_access(body), QString());
+    body.fill(QChar(0));
+    if (good) {
+        setAccessShownJson(QStringLiteral("{}"));
+        setStatusText(QStringLiteral("Done for %1").arg(shown.value(QStringLiteral("requester")).toString()));
+    }
+    refreshAccess();
+    return good;
+}
+
+bool EvmKeystoreUiBackend::rejectAccess(QString handle)
+{
+    setLastError(QString());
+    const bool good = modules().signer_manager_module.reject_access(handle);
+    if (good)
+        setAccessShownJson(QStringLiteral("{}"));
+    refreshAccess();
+    return good;
+}
+
+void EvmKeystoreUiBackend::dismissAccess()
+{
+    setAccessShownJson(QStringLiteral("{}"));
+}
+
+bool EvmKeystoreUiBackend::unlockAccount(QString account, QString password, QString termsJson)
+{
+    setLastError(QString());
+    QJsonObject p = QJsonDocument::fromJson(termsJson.toUtf8()).object();
+    p[QStringLiteral("account")] = account;
+    p[QStringLiteral("password")] = password;
+    QString body = params(p);
+    password.fill(QChar(0));
+    const bool good = okManager(modules().signer_manager_module.unlock(body), QStringLiteral("unlock"));
+    body.fill(QChar(0));
+    refreshAccess();
+    return good;
+}
+
+bool EvmKeystoreUiBackend::lockAccount(QString account)
+{
+    setLastError(QString());
+    QJsonObject p;
+    if (!account.isEmpty())
+        p[QStringLiteral("account")] = account;
+    const bool good = okManager(modules().signer_manager_module.lock(params(p)), QStringLiteral("lock"));
+    refreshAccess();
+    return good;
+}
+
+bool EvmKeystoreUiBackend::closeWallet(QString module, QString group)
+{
+    setLastError(QString());
+    QJsonObject p;
+    p[QStringLiteral("group")] = group;
+    p[QStringLiteral("module")] = module;
+    const bool good =
+        okManager(modules().signer_manager_module.close_account(params(p)), QStringLiteral("close"));
+    refreshAccess();
+    return good;
 }
 
 void EvmKeystoreUiBackend::loadIdentity()
@@ -149,6 +413,8 @@ void EvmKeystoreUiBackend::refresh()
     loadIdentity();
     loadAccounts();
     loadGroups();
+    loadPhrases();
+    refreshAccess();
     setStatusText(isCustodian() ? QStringLiteral("Ready")
                                 : QStringLiteral("Not the configured custodian"));
     setBusy(false);
@@ -163,14 +429,10 @@ QString EvmKeystoreUiBackend::generateMnemonic(int words)
     return parseObject(reply).value(QStringLiteral("phrase")).toString();
 }
 
-bool EvmKeystoreUiBackend::importMnemonic(QString phrase, QString bip39Passphrase,
-                                          QString accountPassword, QString groupPassword,
-                                          bool derivable, QString groupLabel)
+bool EvmKeystoreUiBackend::importMnemonicWith(QJsonObject p, QString accountPassword, QString groupPassword,
+                                              bool derivable, QString groupLabel)
 {
     setLastError(QString());
-    QJsonObject p;
-    p[QStringLiteral("phrase")] = phrase;
-    p[QStringLiteral("passphrase")] = bip39Passphrase;
     p[QStringLiteral("password")] = accountPassword;
     // The wallet's name, kept whichever storage is chosen: a group record is written for both,
     // and this is the only moment the keystore accepts one.
@@ -180,10 +442,46 @@ bool EvmKeystoreUiBackend::importMnemonic(QString phrase, QString bip39Passphras
     p[QStringLiteral("storage")] = derivable ? QStringLiteral("extkey") : QStringLiteral("plain");
     if (derivable)
         p[QStringLiteral("groupPassword")] = groupPassword;
-    const bool good = ok(modules().keystore_module.import_mnemonic(params(p)), QString());
+    QString body = params(p);
+    for (const QString &k : { QStringLiteral("phrase"), QStringLiteral("passphrase"), QStringLiteral("password"),
+                              QStringLiteral("phrasePassword"), QStringLiteral("keepPhrase"),
+                              QStringLiteral("groupPassword") })
+        p.remove(k);
+    accountPassword.fill(QChar(0));
+    groupPassword.fill(QChar(0));
+    const bool good = ok(modules().keystore_module.import_mnemonic(body), QString());
+    body.fill(QChar(0));
     if (good)
         refresh();
     return good;
+}
+
+bool EvmKeystoreUiBackend::importMnemonic(QString phrase, QString bip39Passphrase,
+                                          QString accountPassword, QString groupPassword,
+                                          bool derivable, QString groupLabel, QString keepPhrasePassword)
+{
+    QJsonObject p;
+    p[QStringLiteral("phrase")] = phrase;
+    p[QStringLiteral("passphrase")] = bip39Passphrase;
+    if (!keepPhrasePassword.isEmpty())
+        p[QStringLiteral("keepPhrase")] = QJsonObject{ { QStringLiteral("password"), keepPhrasePassword } };
+    phrase.fill(QChar(0));
+    bip39Passphrase.fill(QChar(0));
+    keepPhrasePassword.fill(QChar(0));
+    return importMnemonicWith(p, accountPassword, groupPassword, derivable, groupLabel);
+}
+
+bool EvmKeystoreUiBackend::importMnemonicFromKept(QString phraseId, QString phrasePassword, QString bip39Passphrase,
+                                                  QString accountPassword, QString groupPassword, bool derivable,
+                                                  QString groupLabel)
+{
+    QJsonObject p;
+    p[QStringLiteral("keptPhrase")] = phraseId;
+    p[QStringLiteral("phrasePassword")] = phrasePassword;
+    p[QStringLiteral("passphrase")] = bip39Passphrase;
+    phrasePassword.fill(QChar(0));
+    bip39Passphrase.fill(QChar(0));
+    return importMnemonicWith(p, accountPassword, groupPassword, derivable, groupLabel);
 }
 
 bool EvmKeystoreUiBackend::importPrivateKey(QString privHex, QString accountPassword)
