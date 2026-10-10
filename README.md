@@ -12,7 +12,9 @@ custodian. An app that wants a Bitcoin wallet asks the manager to **open** one, 
 wants signatures without a password each time asks for an account to stay **unlocked**; the
 person decides both here, on their own terms, through the `keystore.accounts.open` intent or the
 requests listed at the top of the screen. The keys app also unlocks and locks accounts with
-nobody asking, and closes wallets opened for apps.
+nobody asking, and closes wallets opened for apps. The Signer sends the person here to unlock the
+account a request signs with, through `keystore.accounts.unlock`: that account is offered first,
+for the app that asked, and the terms are still the person's.
 
 ## Screens
 
@@ -37,6 +39,7 @@ nobody asking, and closes wallets opened for apps.
 | Requests from apps *(open a wallet, unlock an account)* | the manager's `access_requests`, `acknowledge_access`, `approve_access`, `reject_access` |
 | Requests from apps → Add a wallet… *(of the kind and on the network asked for; picked once made)* | `create_mnemonic`, `import_bitcoin` |
 | Unlock… / Unlocked / Lock all | the manager's `unlock`, `unlocked`, `lock` |
+| Unlock, from the Signer *(`keystore.accounts.unlock`: the account offered first)* | the manager's `unlock` |
 | Open in apps / Close | the manager's `open_accounts`, `close_account` |
 
 There is no plain "create account" button, and no way here to a key generated from randomness
@@ -258,10 +261,12 @@ python3 doctests/assert_ui.py               # the rest, against an app on port 3
 `doctests/evm-keystore-ui-e2e.test.yaml` runs the keys app in a headless host beside the
 `keys_probe` fixture. The fixture asks to open any native segwit wallet on regtest before one
 exists, so the person adds one from the request, keeping its phrase, and opens it. The fixture
-then asks to unlock it for two confirmed signatures, and the person grants that too. Last, the
+then asks to unlock it for two confirmed signatures, and the person grants that too. Then the
 person shows the descriptor and the kept phrase behind their warnings and forgets the phrase.
-The spec checks what the fixture was handed: the descriptors, a 32-byte database key, and the
-terms the person granted.
+Last, the Signer's `keystore.accounts.unlock` arrives for an imported key: the host has no shell,
+so the spec calls the view's own handler, and the person unlocks the account offered. The spec
+checks what the fixture was handed: the descriptors, a 32-byte database key, and the terms the
+person granted.
 
 ## Building
 

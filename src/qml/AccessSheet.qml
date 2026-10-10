@@ -114,6 +114,7 @@ LogosDialog {
         // ── the terms, for an unlock request or an open that unlocks too ───────────
         UnlockTerms {
             id: terms
+            namePrefix: "access"
             Layout.fillWidth: true
             visible: !sheet.isOpen || alsoUnlock.checked
         }
