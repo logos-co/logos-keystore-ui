@@ -10,7 +10,7 @@
     # The keys app is the manager's custodian: it decides open and unlock requests. Pinned to the
     # manager's first branch until it reaches main.
     signer_manager_module = {
-      url = "github:logos-co/logos-signer-manager-module/ab2ccfeb2c193dc39bde28c9be9a9c19fdf35ab7";
+      url = "github:logos-co/logos-signer-manager-module/0342cbcd43596b91fa1bda8c1fa3feccf09ef635";
       inputs.logos-module-builder.follows = "logos-module-builder";
       inputs.keystore_module.follows = "keystore_module";
     };
