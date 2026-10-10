@@ -22,14 +22,15 @@ LogosDialog {
     property var words: []
     property string keptId: ""
 
-    function reset() {
+    // Not `reset`: a Dialog already has a reset() signal, which would be emitted instead.
+    function clearForm() {
         source = "create"; phrase = ""; words = []; keptId = ""
         typedPhrase.text = ""; confirmWords.text = ""; passphrase.text = ""; keptPw.text = ""
         walletPw.text = ""; walletName.text = ""; keepPhrase.checked = false; keepPw.text = ""
         segwit.checked = true; testChain.checked = true; createOption.checked = true
     }
-    onOpened: reset()
-    onClosed: reset()
+    onOpened: clearForm()
+    onClosed: clearForm()
 
     readonly property bool phraseReady: source === "type" ? typedPhrase.text.trim().split(/\s+/).length >= 12
                                         : source === "kept" ? keptId !== "" && keptPw.text.length > 0
