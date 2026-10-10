@@ -20,6 +20,15 @@ class EvmKeystoreUiBackend : public EvmKeystoreUiSimpleSource,
 {
 public:
     void refresh() override;
+    void refreshAccess() override;
+    bool showAccess(QString handle) override;
+    bool approveAccess(QString handle, QString bundleId, QString group, QString password,
+                       QString unlockJson) override;
+    bool rejectAccess(QString handle) override;
+    void dismissAccess() override;
+    bool unlockAccount(QString account, QString password, QString termsJson) override;
+    bool lockAccount(QString account) override;
+    bool closeWallet(QString module, QString group) override;
 
     QString generateMnemonic(int words) override;
     bool importMnemonic(QString phrase, QString bip39Passphrase, QString accountPassword,
@@ -40,6 +49,14 @@ public:
     bool setLabel(QString address, QString label, QString password) override;
     bool setWalletName(QString group, QString name, QString address, QString password) override;
     bool changePassword(QString address, QString oldPassword, QString newPassword) override;
+
+    bool importBitcoin(QString phrase, QString bip39Passphrase, QString family, QString chain,
+                       QString password, QString label, QString keepPhrasePassword) override;
+    bool importBitcoinFromKept(QString phraseId, QString phrasePassword, QString bip39Passphrase,
+                               QString family, QString chain, QString password, QString label) override;
+    QString showPhrase(QString phraseId, QString password) override;
+    bool forgetPhrase(QString phraseId) override;
+    QString walletDescriptors(QString group) override;
     bool deleteAccount(QString address, QString password) override;
 
 protected:
@@ -56,10 +73,14 @@ private:
     /// `ok`, and record whether that read answered under `key`. A refused read empties what
     /// it feeds; the view cannot tell that from an empty keystore unless it is told.
     bool read(const QString &key, const QString &reply, const QString &context);
+    /// `ok` for the signer manager, whose refusal names its own role.
+    bool okManager(const QString &reply, const QString &context);
     void publishReads();
     void loadAccounts();
     void loadGroups();
     void loadIdentity();
+    void loadPhrases();
+    bool importBitcoinWith(QJsonObject p);
 
     QJsonObject m_reads;
 };
