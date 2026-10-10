@@ -31,19 +31,52 @@ Item {
         function onViewModuleReadyChanged(moduleName, isReady) {
             if (moduleName === "evm_keystore_ui") root.ready = isReady && root.backend !== null
         }
-
-        // Somebody wants accounts managed, and the shell has already brought us forward —
-        // arriving IS the request, so answer now rather than waiting for the human to do
-        // something. `handoff: true` is what leaves them here instead of bouncing them back.
-        //
-        // Answered `ok` even when this build is not the custodian. The request was to reach
-        // the accounts surface and it did; whether accounts can be CHANGED from here is what
-        // the READ ONLY badge and its banner are for, and `ready` may still be false at the
-        // instant we are dispatched, so gating on it would refuse a request that succeeded.
         function onIntentRequested(requestId, intent, params, requesterName) {
-            if (intent !== "evm.accounts.manage") return
-            logos.respond(requestId, true, ({}), "")
+            root.serviceIntent(requestId, intent, params, requesterName)
         }
+    }
+
+    // Somebody wants accounts managed, and the shell has already brought us forward —
+    // arriving IS the request, so answer now rather than waiting for the human to do
+    // something. `handoff: true` is what leaves them here instead of bouncing them back.
+    //
+    // Answered `ok` even when this build is not the custodian. The request was to reach
+    // the accounts surface and it did; whether accounts can be CHANGED from here is what
+    // the READ ONLY badge and its banner are for, and `ready` may still be false at the
+    // instant we are dispatched, so gating on it would refuse a request that succeeded.
+    function serviceIntent(requestId, intent, params, requesterName) {
+        if (intent === "keystore.accounts.open") {
+            // An app's open or unlock request, by the manager's handle. Answered when the
+            // person decides; a handle the manager does not hold is a bad request.
+            root.intentByHandle[params.handle] = requestId
+            logos.watch(root.backend.showAccess(params.handle), function (opened) {
+                if (opened) accessSheet.open()
+                else root.answerIntent(params.handle, false, "bad_request")
+            })
+            return
+        }
+        if (intent === "keystore.accounts.unlock") {
+            // Another app sends the person here to unlock an account: offered first, terms theirs.
+            // Answered when they unlock or leave; a newer request ends the one it replaces.
+            if (root.unlockIntent !== "") logos.respond(root.unlockIntent, false, ({}), "cancelled")
+            root.unlockIntent = requestId
+            unlockSheet.presetAccount = params.account || ""
+            unlockSheet.presetApp = params.app || ""
+            if (unlockSheet.opened) unlockSheet.applyPresets(); else unlockSheet.open()
+            return
+        }
+        if (intent !== "evm.accounts.manage") return
+        logos.respond(requestId, true, ({}), "")
+    }
+    property string unlockIntent: ""
+
+    // Intents being serviced, keyed by the manager's handle each one named.
+    property var intentByHandle: ({})
+    function answerIntent(handle, ok, error) {
+        var id = root.intentByHandle[handle]
+        if (id === undefined) return
+        delete root.intentByHandle[handle]
+        logos.respond(id, ok, ({}), error)
     }
 
     function j(t, fb) { try { return JSON.parse(t && t.length ? t : fb) } catch (e) { return JSON.parse(fb) } }
@@ -56,6 +89,35 @@ Item {
     readonly property var walletNames: ready ? j(backend.walletNamesJson, "{}") : ({})
     readonly property bool custodian: ready && backend.isCustodian
     readonly property var identity: ready ? j(backend.identityJson, "{}") : ({})
+
+    // The signer manager, as its custodian: apps' open and unlock requests, what is unlocked,
+    // and which wallets are open for which apps.
+    readonly property var phrases: ready ? j(backend.phrasesJson, "[]") : []
+    readonly property bool managerCustodian: ready && backend.isManagerCustodian
+    readonly property var access: ready ? j(backend.accessJson, "[]") : []
+    readonly property var accessShown: ready ? j(backend.accessShownJson, "{}") : ({})
+    readonly property var unlocked: ready ? j(backend.unlockedJson, "[]") : []
+    readonly property var openWallets: ready ? j(backend.openJson, "[]") : []
+    readonly property var bitcoinWallets: root.groups.filter(function (g) { return !!g.family })
+        .map(function (g) {
+            return { id: g.id, name: root.walletNameOf(g.id) || g.id, family: g.family, chain: g.chain }
+        })
+    // What can be unlocked: every account by address, and every Bitcoin wallet by id.
+    readonly property var unlockable: root.accounts.map(function (a) {
+            var label = root.labels[String(a).toLowerCase()] || root.labels[a] || ""
+            return { id: String(a), name: label ? label + "  " + a : String(a) }
+        }).concat(root.bitcoinWallets.map(function (w) { return { id: w.id, name: w.name + " (Bitcoin)" } }))
+    function accountName(id) {
+        var hit = root.unlockable.filter(function (u) { return u.id.toLowerCase() === String(id).toLowerCase() })
+        return hit.length ? hit[0].name : String(id)
+    }
+    function termsLine(u) {
+        var when = u.expiresInMs === null || u.expiresInMs === undefined ? "until locked"
+                   : "for " + Math.max(1, Math.round(u.expiresInMs / 60000)) + " more min"
+        var count = u.countLeft === null || u.countLeft === undefined ? "no limit" : u.countLeft + " left"
+        var apps = (u.apps || []).length ? u.apps.join(", ") : "nobody"
+        return when + ", " + count + ", for " + apps + (u.confirm === false ? ", without asking" : ", confirmed")
+    }
 
     // What the key directory holds. Read from that directory alone, so this stays populated
     // when groups.json is unreadable and no wallet is listed — otherwise the key would be
@@ -73,7 +135,8 @@ Item {
     readonly property var refusedReads: {
         var say = { accounts: "the account list", labels: "account names",
                     groups: "the wallet list", provenance: "where each account came from",
-                    derivationKeys: "the derivation keys on disk", walletNames: "wallet names" }
+                    derivationKeys: "the derivation keys on disk", walletNames: "wallet names",
+                    phrases: "the kept recovery phrases" }
         var out = []
         for (var k in say) if (root.reads[k] === false) out.push(say[k])
         return out
@@ -212,7 +275,10 @@ Item {
         var bits = []
         var pre = walletSubtitleOf(n.group)
         if (pre.length > 0) bits.push(pre)
-        if (n.countKnown)
+        // A Bitcoin wallet has no EVM accounts to count: its addresses come from its descriptor.
+        if (n.group && n.group.family)
+            bits.push(n.group.family === "bitcoin_taproot" ? "Bitcoin, taproot" : "Bitcoin, native segwit")
+        else if (n.countKnown)
             bits.push(n.addresses.length === 1 ? "1 account" : n.addresses.length + " accounts")
         return bits.join("  ·  ")
     }
@@ -264,6 +330,9 @@ Item {
     // say "no accounts" — that is the read failing, stated as a fact about the wallet.
     function nodeEmptyLine(n) {
         if (n.kind !== "wallet" || !n.countKnown || n.addresses.length > 0) return ""
+        if (n.group && n.group.family)
+            return "Apps that open this wallet see its addresses and can ask you to sign; it holds no "
+                 + "EVM accounts."
         return n.group.derivable === true
                ? "No accounts. Adding one continues from #" + Tree.nextIndexOf(n.group) + "."
                : "No accounts. Adding one needs this wallet's recovery phrase."
@@ -276,10 +345,21 @@ Item {
              + "as it having none."
     }
     function nodeBadges(n) {
+        if (n.kind === "wallet" && n.group && n.group.family) {
+            var btc = [{ name: "walletBitcoin_" + n.id, text: n.group.chain === "main" ? "BITCOIN" : "BITCOIN TEST",
+                         color: Theme.palette.info }]
+            if (n.group.phrase)
+                btc.push({ name: "walletKeptPhrase_" + n.id, text: "PHRASE KEPT", color: Theme.palette.warning })
+            if (n.group.usedPassphrase === true)
+                btc.push({ name: "walletPassphrase_" + n.id, text: "PASSPHRASE", color: Theme.palette.textSecondary })
+            return btc
+        }
         if (n.kind === "wallet") {
             var out = [{ name: "walletBadge_" + n.id,
                          text: n.group.derivable ? "DERIVABLE" : "NOT DERIVABLE",
                          color: n.group.derivable ? Theme.palette.info : Theme.palette.textSecondary }]
+            if (n.group.phrase)
+                out.push({ name: "walletKeptPhrase_" + n.id, text: "PHRASE KEPT", color: Theme.palette.warning })
             if (n.group.usedPassphrase === true)
                 out.push({ name: "walletPassphrase_" + n.id, text: "PASSPHRASE",
                            color: Theme.palette.textSecondary })
@@ -351,6 +431,128 @@ Item {
             text: root.ready ? root.backend.lastError : ""
         }
 
+        // ── Apps' requests to the signer manager, decided here with the person ─────────
+        LogosText {
+            objectName: "notManagerCustodianNotice"
+            Layout.fillWidth: true
+            visible: root.ready && !root.managerCustodian
+            wrapMode: Text.WordWrap
+            color: Theme.palette.textSecondary
+            text: "This build is not the signer manager's custodian, so apps' requests to open or "
+                  + "unlock accounts are decided elsewhere."
+        }
+        ColumnLayout {
+            objectName: "accessRequests"
+            Layout.fillWidth: true
+            visible: root.access.length > 0
+            spacing: Theme.spacing.tiny
+            LogosText {
+                font.bold: true
+                text: root.access.length === 1 ? "1 request from an app" : root.access.length + " requests from apps"
+            }
+            Repeater {
+                model: root.access
+                delegate: LogosButton {
+                    objectName: "accessRequest_" + index
+                    Layout.fillWidth: true
+                    text: modelData.requester + (modelData.kind === "open" ? " asks to open a wallet"
+                                                                          : " asks to unlock an account")
+                    onClicked: logos.watch(root.backend.showAccess(modelData.handle),
+                                           function (ok) { if (ok) accessSheet.open() })
+                }
+            }
+        }
+        ColumnLayout {
+            objectName: "unlockedAccounts"
+            Layout.fillWidth: true
+            visible: root.unlocked.length > 0
+            spacing: Theme.spacing.tiny
+            RowLayout {
+                Layout.fillWidth: true
+                LogosText { text: "Unlocked"; font.bold: true }
+                Item { Layout.fillWidth: true }
+                LogosButton {
+                    objectName: "lockAllButton"
+                    text: "Lock all"
+                    onClicked: logos.watch(root.backend.lockAccount(""), function () {})
+                }
+            }
+            Repeater {
+                model: root.unlocked
+                delegate: RowLayout {
+                    Layout.fillWidth: true
+                    LogosText {
+                        objectName: "unlockedLine_" + index
+                        Layout.fillWidth: true
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: root.accountName(modelData.account) + " — " + root.termsLine(modelData)
+                    }
+                    LogosButton {
+                        objectName: "lockButton_" + index
+                        text: "Lock"
+                        onClicked: logos.watch(root.backend.lockAccount(modelData.account), function () {})
+                    }
+                }
+            }
+        }
+        ColumnLayout {
+            objectName: "openWallets"
+            Layout.fillWidth: true
+            visible: root.openWallets.length > 0
+            spacing: Theme.spacing.tiny
+            LogosText { text: "Open in apps"; font.bold: true }
+            Repeater {
+                model: root.openWallets
+                delegate: RowLayout {
+                    Layout.fillWidth: true
+                    LogosText {
+                        objectName: "openLine_" + index
+                        Layout.fillWidth: true
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: (root.walletNameOf(modelData.group) || modelData.group) + " — open for " + modelData.module
+                    }
+                    LogosButton {
+                        objectName: "closeButton_" + index
+                        text: "Close"
+                        onClicked: logos.watch(root.backend.closeWallet(modelData.module, modelData.group),
+                                               function () {})
+                    }
+                }
+            }
+        }
+
+        // ── Kept recovery phrases: off unless the person chose to keep one ──────────────
+        ColumnLayout {
+            objectName: "keptPhrases"
+            Layout.fillWidth: true
+            visible: root.phrases.length > 0
+            spacing: Theme.spacing.tiny
+            LogosText { text: "Kept recovery phrases"; font.bold: true }
+            Repeater {
+                model: root.phrases
+                delegate: RowLayout {
+                    Layout.fillWidth: true
+                    LogosText {
+                        objectName: "keptPhraseLine_" + index
+                        Layout.fillWidth: true
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: "Phrase " + String(modelData.id).substring(0, 10) + "… — used by "
+                              + (modelData.groups || []).length + " wallet(s)"
+                              + (modelData.staged ? ", left by an interrupted write" : "")
+                    }
+                    LogosButton {
+                        objectName: "keptPhraseButton_" + index
+                        text: "Show or forget…"
+                        enabled: root.custodian
+                        onClicked: { keptPhraseSheet.kept = modelData; keptPhraseSheet.open() }
+                    }
+                }
+            }
+        }
+
         // A refusal names itself. Every one of these reads empties what it feeds, and each of
         // those empty answers is also a truthful screen for some keystore — so the difference
         // has to be said outright rather than left to be inferred from what is missing.
@@ -403,6 +605,18 @@ Item {
             LogosButton { objectName: "importPhraseButton"; text: "Import phrase"; enabled: root.custodian; onClicked: phraseSheet.open() }
             LogosButton { objectName: "importKeyButton";    text: "Import key";    enabled: root.custodian; onClicked: keySheet.open() }
             LogosButton { objectName: "importVaultButton";  text: "Import vault";  enabled: root.custodian; onClicked: vaultSheet.open() }
+            LogosButton {
+                objectName: "bitcoinWalletButton"
+                text: "Bitcoin wallet…"
+                enabled: root.custodian
+                onClicked: bitcoinImportSheet.open()
+            }
+            LogosButton {
+                objectName: "unlockAccountButton"
+                text: "Unlock…"
+                enabled: root.managerCustodian && root.unlockable.length > 0
+                onClicked: unlockSheet.open()
+            }
         }
 
         Item {
@@ -458,6 +672,7 @@ Item {
                             expanded: root.collapsed[modelData.id] !== true
 
                             addVisible: modelData.kind === "wallet" && modelData.group.derivable === true
+                                        && !modelData.group.family
                             addEnabled: root.custodian
                             addBlockedLine: (modelData.kind === "wallet" && modelData.group.derivable !== true)
                                             ? "Adding an account needs this wallet's recovery phrase." : ""
@@ -472,6 +687,11 @@ Item {
                             onToggleRequested: root.toggle(modelData.id)
                             onAddRequested: { addSheet.group = modelData.group; addSheet.open() }
                             onManageWalletRequested: {
+                                if (modelData.group && modelData.group.family) {
+                                    bitcoinWalletSheet.group = modelData.group
+                                    bitcoinWalletSheet.open()
+                                    return
+                                }
                                 walletSheet.group = modelData.group
                                 walletSheet.stranded = root.isKeyFrame(modelData)
                                 walletSheet.recordKnown = modelData.kind !== "unreadKey"
@@ -494,6 +714,41 @@ Item {
 
     // ── Add an account to one wallet, and manage that wallet ───────────────────────
     AddAccountSheet { id: addSheet; backend: root.backend; view: root }
+
+    // ── An app's request, and the person's own unlock ──────────────────────────────
+    AccessSheet {
+        id: accessSheet
+        backend: root.backend
+        shown: root.accessShown
+        wallets: root.bitcoinWallets
+        onDecided: function (handle, approved) { root.answerIntent(handle, approved, approved ? "" : "rejected") }
+        onDeferred: function (handle) { root.answerIntent(handle, false, "cancelled") }
+        onAddWallet: function (family, chain) {
+            bitcoinImportSheet.presetFamily = family
+            bitcoinImportSheet.presetChain = chain
+            bitcoinImportSheet.open()
+        }
+    }
+    UnlockSheet {
+        id: unlockSheet
+        backend: root.backend
+        accounts: root.unlockable
+        onFinished: function (unlocked) {
+            if (root.unlockIntent === "") return
+            logos.respond(root.unlockIntent, unlocked, ({}), unlocked ? "" : "cancelled")
+            root.unlockIntent = ""
+        }
+    }
+
+    // ── Bitcoin wallets and kept phrases ───────────────────────────────────────────
+    BitcoinImportSheet {
+        id: bitcoinImportSheet
+        backend: root.backend
+        phrases: root.phrases
+        onAdded: function (group) { if (accessSheet.opened) accessSheet.pickWallet(group) }
+    }
+    BitcoinWalletSheet { id: bitcoinWalletSheet; backend: root.backend; view: root }
+    KeptPhraseSheet { id: keptPhraseSheet; backend: root.backend }
     ManageWalletSheet {
         id: walletSheet
         backend: root.backend
@@ -593,8 +848,8 @@ Item {
         // Held here only, and cleared on close. Never a property.
         property string phrase: ""
         property var words: []
-        onOpened: { phrase = ""; words = []; confirmField.text = ""; newPw.text = ""; createName.text = ""; createStorage.reset() }
-        onClosed: { phrase = ""; words = []; confirmField.text = ""; newPw.text = ""; createName.text = ""; createStorage.reset() }
+        onOpened: { phrase = ""; words = []; confirmField.text = ""; newPw.text = ""; createName.text = ""; createStorage.reset(); createKeep.reset() }
+        onClosed: { phrase = ""; words = []; confirmField.text = ""; newPw.text = ""; createName.text = ""; createStorage.reset(); createKeep.reset() }
 
         contentItem: ColumnLayout {
             spacing: Theme.spacing.small
@@ -669,6 +924,12 @@ Item {
                 visible: createSheet.phrase.length > 0
                 Layout.fillWidth: true
             }
+            KeepPhraseChoice {
+                id: createKeep
+                namePrefix: "create"
+                visible: createSheet.phrase.length > 0
+                Layout.fillWidth: true
+            }
 
             RowLayout {
                 Layout.fillWidth: true
@@ -680,7 +941,7 @@ Item {
                     // The confirmation is the point: an unwritten phrase is an unrecoverable
                     // account, so it is checked here before anything is stored.
                     enabled: createSheet.words.length === 12 && newPw.text.length > 0
-                             && createStorage.complete
+                             && createStorage.complete && createKeep.complete
                              && confirmField.text.trim().toLowerCase().split(/\s+/).join(" ")
                                 === [createSheet.words[0], createSheet.words[4], createSheet.words[11]].join(" ")
                     // No BIP-39 passphrase on a phrase we just generated: it would be a second
@@ -688,7 +949,8 @@ Item {
                     onClicked: logos.watch(root.backend.importMnemonic(createSheet.phrase, "", newPw.text,
                                                                        createStorage.groupPassword,
                                                                        createStorage.derivable,
-                                                                       createName.text.trim()),
+                                                                       createName.text.trim(),
+                                                                       createKeep.password),
                         function (good) { if (good) createSheet.close() })
                 }
             }
@@ -702,15 +964,49 @@ Item {
         title: "Import a recovery phrase"
         anchors.centerIn: parent
         width: Math.min(parent.width - 40, 560)
-        onOpened: { seedField.text = ""; seedPassphrase.text = ""; seedPw.text = ""; seedName.text = ""; phraseStorage.reset() }
-        onClosed: { seedField.text = ""; seedPassphrase.text = ""; seedPw.text = ""; seedName.text = ""; phraseStorage.reset() }
+        // Typed words, or a phrase kept earlier with its own password.
+        property string source: "type"
+        property string keptId: ""
+        // Not `reset`: a Dialog already has a reset() signal, which would be emitted instead.
+        function clearForm() {
+            seedField.text = ""; seedPassphrase.text = ""; seedPw.text = ""; seedName.text = ""; phraseStorage.reset()
+            source = "type"; keptId = ""; seedKeptPw.text = ""; importKeep.reset(); seedTypeOption.checked = true
+        }
+        onOpened: clearForm()
+        onClosed: clearForm()
         contentItem: ColumnLayout {
             spacing: Theme.spacing.small
+            ButtonGroup { id: seedSourceGroup }
+            RowLayout {
+                visible: root.phrases.length > 0
+                LogosRadioButton { id: seedTypeOption; objectName: "importSourceType"; ButtonGroup.group: seedSourceGroup; checked: true; text: "Type a phrase"; onCheckedChanged: if (checked) phraseSheet.source = "type" }
+                LogosRadioButton { objectName: "importSourceKept"; ButtonGroup.group: seedSourceGroup; text: "Use a kept phrase"; onCheckedChanged: if (checked) phraseSheet.source = "kept" }
+            }
             LogosTextArea {
                 id: seedField
                 objectName: "seedField"
+                visible: phraseSheet.source === "type"
                 Layout.fillWidth: true
                 placeholderText: "Recovery phrase (BIP-39 words)"
+            }
+            ButtonGroup { id: seedKeptGroup }
+            Repeater {
+                model: phraseSheet.source === "kept" ? root.phrases : []
+                delegate: LogosRadioButton {
+                    objectName: "importKept_" + index
+                    ButtonGroup.group: seedKeptGroup
+                    text: "Kept phrase " + String(modelData.id).substring(0, 10) + "…, used by "
+                          + (modelData.groups || []).length + " wallet(s)"
+                    onCheckedChanged: if (checked) phraseSheet.keptId = modelData.id
+                }
+            }
+            LogosTextField {
+                id: seedKeptPw
+                objectName: "importKeptPasswordField"
+                visible: phraseSheet.source === "kept"
+                Layout.fillWidth: true
+                echoMode: TextInput.Password
+                placeholderText: "The kept phrase's password"
             }
 
             // Visible by default, never behind a disclosure: a passphrase that is silently
@@ -765,6 +1061,12 @@ Item {
                 objectName: "importStorageChoice"
                 Layout.fillWidth: true
             }
+            KeepPhraseChoice {
+                id: importKeep
+                namePrefix: "import"
+                visible: phraseSheet.source === "type"
+                Layout.fillWidth: true
+            }
             RowLayout {
                 Layout.fillWidth: true
                 LogosButton { text: "Cancel"; onClicked: phraseSheet.close() }
@@ -772,15 +1074,23 @@ Item {
                 LogosButton {
                     objectName: "importPhraseConfirm"
                     text: "Import"
-                    enabled: seedField.text.trim().length > 0 && seedPw.text.length > 0
-                             && phraseStorage.complete
-                    onClicked: logos.watch(root.backend.importMnemonic(seedField.text.trim(),
-                                                                      seedPassphrase.text,
-                                                                      seedPw.text,
-                                                                      phraseStorage.groupPassword,
-                                                                      phraseStorage.derivable,
-                                                                      seedName.text.trim()),
-                        function (good) { if (good) phraseSheet.close() })
+                    enabled: (phraseSheet.source === "kept" ? phraseSheet.keptId !== "" && seedKeptPw.text.length > 0
+                                                            : seedField.text.trim().length > 0 && importKeep.complete)
+                             && seedPw.text.length > 0 && phraseStorage.complete
+                    onClicked: {
+                        var done = function (good) { if (good) phraseSheet.close() }
+                        if (phraseSheet.source === "kept")
+                            logos.watch(root.backend.importMnemonicFromKept(phraseSheet.keptId, seedKeptPw.text,
+                                                                            seedPassphrase.text, seedPw.text,
+                                                                            phraseStorage.groupPassword,
+                                                                            phraseStorage.derivable,
+                                                                            seedName.text.trim()), done)
+                        else
+                            logos.watch(root.backend.importMnemonic(seedField.text.trim(), seedPassphrase.text,
+                                                                    seedPw.text, phraseStorage.groupPassword,
+                                                                    phraseStorage.derivable, seedName.text.trim(),
+                                                                    importKeep.password), done)
+                    }
                 }
             }
         }

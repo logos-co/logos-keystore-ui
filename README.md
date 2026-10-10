@@ -7,13 +7,22 @@ account picker; `evm_signer_ui` shows what is being signed and takes the passwor
 Neither can change the keystore, and that is enforced by the keystore itself — this module is
 its configured **custodian**, and Tier D admits nobody else.
 
+It is also the [signer manager](https://github.com/logos-co/logos-signer-manager-module)'s
+custodian. An app that wants a Bitcoin wallet asks the manager to **open** one, and an app that
+wants signatures without a password each time asks for an account to stay **unlocked**; the
+person decides both here, on their own terms, through the `keystore.accounts.open` intent or the
+requests listed at the top of the screen. The keys app also unlocks and locks accounts with
+nobody asking, and closes wallets opened for apps. The Signer sends the person here to unlock the
+account a request signs with, through `keystore.accounts.unlock`: that account is offered first,
+for the app that asked, and the terms are still the person's.
+
 ## Screens
 
 | Screen | Keystore method |
 |---|---|
 | Accounts | `list_accounts`, `get_labels`, `list_groups`, `list_derivation_keys`, `get_provenance`, `get_group_labels` *(all ungated)* |
-| Create | `create_mnemonic` → shown once → confirmed → `import_mnemonic` |
-| Import phrase | `import_mnemonic` |
+| Create *(keeping the phrase is offered)* | `create_mnemonic` → shown once → confirmed → `import_mnemonic` |
+| Import phrase *(typed, keeping it is offered; or a kept phrase)* | `import_mnemonic` |
 | Import private key | `import_private_key` |
 | Import vault | `import_keystore_json` |
 | Add account *(on a wallet's own row)* | `derive_next_account` |
@@ -24,6 +33,14 @@ its configured **custodian**, and Tier D admits nobody else.
 | Export | `export_keystore_json` |
 | Delete a stranded derivation key | `list_derivation_keys` → `forget_derivation` |
 | Delete | `delete_account` |
+| Bitcoin wallet… *(create, type, or use a kept phrase; native segwit or taproot; main or test)* | `create_mnemonic`, `import_bitcoin` |
+| Manage a Bitcoin wallet → Show descriptor | `account_descriptors` |
+| Kept recovery phrases → Show or forget | `list_phrases`, `show_phrase`, `forget_phrase` |
+| Requests from apps *(open a wallet, unlock an account)* | the manager's `access_requests`, `acknowledge_access`, `approve_access`, `reject_access` |
+| Requests from apps → Add a wallet… *(of the kind and on the network asked for; picked once made)* | `create_mnemonic`, `import_bitcoin` |
+| Unlock… / Unlocked / Lock all | the manager's `unlock`, `unlocked`, `lock` |
+| Unlock, from the Signer *(`keystore.accounts.unlock`: the account offered first)* | the manager's `unlock` |
+| Open in apps / Close | the manager's `open_accounts`, `close_account` |
 
 There is no plain "create account" button, and no way here to a key generated from randomness
 rather than derived from a phrase. `create_unrelated_account` stays on the keystore's contract —
@@ -238,7 +255,19 @@ defaults, and blaming the deployment for a torn file is a different bug to go lo
 python3 doctests/assert_ui.py --grep-only   # no app, no socket
 node doctests/tree_table.mjs                # the tree rules, as a table
 python3 doctests/assert_ui.py               # the rest, against an app on port 3768
+./doctests/run.sh                           # the e2e spec: an app's open and unlock, decided here
 ```
+
+`doctests/evm-keystore-ui-e2e.test.yaml` runs the keys app in a headless host beside the
+`keys_probe` fixture. The fixture asks to open any native segwit wallet on regtest before one
+exists, so the person adds one from the request, keeping its phrase, and opens it. The fixture
+then asks to unlock it for two confirmed signatures, and the person grants that too. Then the
+person shows the descriptor, makes an EVM wallet from the kept phrase without typing it, and
+shows and forgets the phrase. Last, the Signer's `keystore.accounts.unlock` arrives for the EVM
+wallet's account: the host has no shell, so the spec calls the view's own handler, and the person
+unlocks the account offered. The spec
+checks what the fixture was handed: the descriptors, a 32-byte database key, and the terms the
+person granted.
 
 ## Building
 
